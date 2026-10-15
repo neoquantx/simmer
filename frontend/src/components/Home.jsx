@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
 import IngredientTags from './IngredientTags.jsx';
 import ConstraintChips from './ConstraintChips.jsx';
+import MealChips from './MealChips.jsx';
 import PhotoCapture from './PhotoCapture.jsx';
 import RecipeCards from './RecipeCards.jsx';
 import { suggestRecipes, getPantry, savePantry } from '../utils/api.js';
 import { getSessionId } from '../utils/session.js';
+import { mealForHour, mealLabel, mealQuestion } from '../utils/meals.js';
 
 const EXAMPLE_INGREDIENTS = ['eggs', 'rice', 'spinach', 'chicken', 'tomato', 'onion'];
 
 const LOADING_MESSAGES = [
-  'Cooking up 3 doable dinners...',
-  'Checking what goes great together...',
-  'Zero fancy kitchen gear required...',
-  'Finding recipes that fit your evening...',
+  'Looking at what you already have...',
+  'Checking what goes together...',
+  'Keeping the shopping list short...',
+  'Picking 3 you can actually cook...',
 ];
 
 /**
@@ -20,9 +22,17 @@ const LOADING_MESSAGES = [
  * What's for dinner screen with fridge snap, ingredient tags, dislikes, constraints,
  * and 3 doable suggestions.
  */
-export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
+export default function Home({
+  onCookRecipe,
+  savedRecipeIds = [],
+  freeUsesRemaining = 3,
+  onNeedSubscription,
+  onSuggestionUsed,
+}) {
   const [ingredients, setIngredients] = useState([]);
   const [dislikes, setDislikes] = useState([]);
+  const [rememberedPantry, setRememberedPantry] = useState(false);
+  const [selectedMeal, setSelectedMeal] = useState(mealForHour);
   const [selectedConstraint, setSelectedConstraint] = useState('');
   const [recipes, setRecipes] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -45,6 +55,7 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
         if (isMounted && data) {
           if (Array.isArray(data.ingredients) && data.ingredients.length > 0) {
             setIngredients(data.ingredients);
+            setRememberedPantry(true);
           }
           if (Array.isArray(data.dislikes) && data.dislikes.length > 0) {
             setDislikes(data.dislikes);
@@ -143,6 +154,11 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
 
   // Main Suggest action
   const handleFeedMeRecipes = async () => {
+    if (freeUsesRemaining <= 0) {
+      onNeedSubscription?.();
+      return;
+    }
+
     if (ingredients.length === 0 && !inputText.trim()) {
       setFeedbackError('Add a couple of ingredients you have at home first! 🍅');
       handleFocusInput();
@@ -170,12 +186,14 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
         finalIngredients,
         dislikes,
         selectedConstraint,
-        sessionId
+        sessionId,
+        selectedMeal
       );
 
       const returnedRecipes = result.recipes || result.suggestions || (Array.isArray(result) ? result : []);
 
       if (returnedRecipes.length > 0) {
+        onSuggestionUsed?.(result.free_uses_remaining);
         setRecipes(returnedRecipes);
         // Gently scroll to recipes
         setTimeout(() => {
@@ -186,6 +204,11 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
       }
     } catch (err) {
       console.error('Suggest recipes failed:', err);
+      if (err.status === 402) {
+        onNeedSubscription?.();
+        setIsLoading(false);
+        return;
+      }
       // If server unreachable or error, provide 3 warm fallback recipes so the user is never stuck
       const mockFallbackRecipes = [
         {
@@ -254,12 +277,19 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
           </h1>
         </div>
         <p className="text-base font-semibold text-charcoal-muted">
-          What's for dinner? Snap your fridge, get 3 doable recipes.
+          What’s for {mealQuestion(selectedMeal)}? Snap your fridge, get 3 ideas.
         </p>
       </header>
 
       {/* Primary Input Card */}
       <section className="bg-white rounded-3xl p-5 sm:p-7 shadow-soft border border-charcoal-border/70 space-y-5">
+        <div>
+          <label className="block text-xs font-black uppercase tracking-wider text-charcoal-muted mb-2">
+            This meal
+          </label>
+          <MealChips selectedMeal={selectedMeal} onSelectMeal={setSelectedMeal} />
+        </div>
+
         <div>
           <label className="block text-xs font-black uppercase tracking-wider text-charcoal-muted mb-2">
             What do you have?
@@ -311,7 +341,7 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
           <div className="pt-1">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-black uppercase tracking-wider text-charcoal-muted">
-                In your kitchen ({ingredients.length}):
+                {rememberedPantry ? 'Still in your kitchen' : 'In your kitchen'} ({ingredients.length})
               </span>
               <button
                 type="button"
@@ -371,7 +401,7 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
         {/* Constraint Filter Chips */}
         <div className="pt-3 border-t border-charcoal-border/50">
           <label className="block text-xs font-bold uppercase tracking-wider text-charcoal-muted mb-2">
-            Dinner Vibe:
+            Any limits?
           </label>
           <ConstraintChips
             selectedConstraint={selectedConstraint}
@@ -406,6 +436,11 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
             </>
           )}
         </button>
+        <p className="text-center text-xs font-bold text-charcoal-muted -mt-2">
+          {freeUsesRemaining > 0
+            ? `${freeUsesRemaining} free meal${freeUsesRemaining === 1 ? '' : 's'} left, then ₹99 for the year`
+            : 'Free meals used. The year is ₹99.'}
+        </p>
       </section>
 
       {/* Loading State Animation */}
@@ -436,6 +471,7 @@ export default function Home({ onCookRecipe, savedRecipeIds = [] }) {
         {!isLoading && recipes.length > 0 && (
           <RecipeCards
             recipes={recipes}
+            mealLabel={mealLabel(selectedMeal)}
             onCookRecipe={onCookRecipe}
             savedIds={savedRecipeIds}
           />
