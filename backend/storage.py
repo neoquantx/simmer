@@ -74,6 +74,21 @@ class StorageBackend(ABC):
         """Get history entries for a session, ordered from newest to oldest."""
         pass
 
+    @abstractmethod
+    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        """Return the session row, creating it with zero free uses if needed."""
+        pass
+
+    @abstractmethod
+    async def mark_entered(self, session_id: str) -> Dict[str, Any]:
+        """Remember that this session opened the kitchen."""
+        pass
+
+    @abstractmethod
+    async def increment_free_uses(self, session_id: str) -> Dict[str, Any]:
+        """Count one successful recipe suggestion against the free tier."""
+        pass
+
 
 class SqliteBackend(StorageBackend):
     """SQLite implementation of StorageBackend storing data in simmer.db."""
@@ -99,6 +114,16 @@ class SqliteBackend(StorageBackend):
         """Initialize database schema synchronously."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    entered INTEGER NOT NULL DEFAULT 0,
+                    free_uses INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT
+                );
+                """
+            )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pantries (
@@ -374,6 +399,90 @@ class SqliteBackend(StorageBackend):
         async with self._lock:
             return await asyncio.to_thread(_query)
 
+    def _session_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "session_id": row["session_id"],
+            "entered": bool(row["entered"]),
+            "free_uses": int(row["free_uses"] or 0),
+            "updated_at": row["updated_at"],
+        }
+
+    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, entered, free_uses, updated_at)
+                    VALUES (?, 0, 0, ?)
+                    ON CONFLICT(session_id) DO NOTHING
+                    """,
+                    (session_id, updated_at),
+                )
+                conn.commit()
+                cursor.execute(
+                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                return self._session_from_row(cursor.fetchone())
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def mark_entered(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, entered, free_uses, updated_at)
+                    VALUES (?, 1, 0, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        entered = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (session_id, updated_at),
+                )
+                conn.commit()
+                cursor.execute(
+                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                return self._session_from_row(cursor.fetchone())
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def increment_free_uses(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, entered, free_uses, updated_at)
+                    VALUES (?, 0, 1, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        free_uses = free_uses + 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (session_id, updated_at),
+                )
+                conn.commit()
+                cursor.execute(
+                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                return self._session_from_row(cursor.fetchone())
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
 
 class MongoBackend(StorageBackend):
     """MongoDB Atlas implementation of StorageBackend using PyMongo."""
@@ -398,6 +507,7 @@ class MongoBackend(StorageBackend):
         self.db.history.create_index(
             [("session_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)]
         )
+        self.db.sessions.create_index([("session_id", pymongo.ASCENDING)], unique=True)
 
     @property
     def backend_name(self) -> str:
@@ -502,6 +612,57 @@ class MongoBackend(StorageBackend):
 
         return await asyncio.to_thread(_op)
 
+    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            existing = self.db.sessions.find_one({"session_id": session_id}, {"_id": 0})
+            if existing:
+                return existing
+            doc = {
+                "session_id": session_id,
+                "entered": False,
+                "free_uses": 0,
+                "updated_at": updated_at,
+            }
+            self.db.sessions.insert_one(dict(doc))
+            return doc
+
+        return await asyncio.to_thread(_op)
+
+    async def mark_entered(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            self.db.sessions.update_one(
+                {"session_id": session_id},
+                {
+                    "$set": {"entered": True, "updated_at": updated_at},
+                    "$setOnInsert": {"free_uses": 0, "session_id": session_id},
+                },
+                upsert=True,
+            )
+            return self.db.sessions.find_one({"session_id": session_id}, {"_id": 0})
+
+        return await asyncio.to_thread(_op)
+
+    async def increment_free_uses(self, session_id: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def _op():
+            self.db.sessions.update_one(
+                {"session_id": session_id},
+                {
+                    "$inc": {"free_uses": 1},
+                    "$set": {"updated_at": updated_at},
+                    "$setOnInsert": {"entered": False, "session_id": session_id},
+                },
+                upsert=True,
+            )
+            return self.db.sessions.find_one({"session_id": session_id}, {"_id": 0})
+
+        return await asyncio.to_thread(_op)
+
 
 class InMemoryBackend(StorageBackend):
     """In-memory dictionary fallback backend."""
@@ -510,6 +671,7 @@ class InMemoryBackend(StorageBackend):
         self._pantries: Dict[str, Dict[str, Any]] = {}
         self._recipe_box: Dict[str, Dict[str, Any]] = {}
         self._history: List[Dict[str, Any]] = []
+        self._sessions: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -592,6 +754,44 @@ class InMemoryBackend(StorageBackend):
             ]
             items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return items[:limit]
+
+    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            doc = self._sessions.get(session_id)
+            if doc:
+                return dict(doc)
+            doc = {
+                "session_id": session_id,
+                "entered": False,
+                "free_uses": 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._sessions[session_id] = doc
+            return dict(doc)
+
+    async def mark_entered(self, session_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            doc = self._sessions.get(session_id) or {
+                "session_id": session_id,
+                "entered": False,
+                "free_uses": 0,
+            }
+            doc["entered"] = True
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._sessions[session_id] = doc
+            return dict(doc)
+
+    async def increment_free_uses(self, session_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            doc = self._sessions.get(session_id) or {
+                "session_id": session_id,
+                "entered": False,
+                "free_uses": 0,
+            }
+            doc["free_uses"] = int(doc.get("free_uses") or 0) + 1
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._sessions[session_id] = doc
+            return dict(doc)
 
 
 _storage_singleton: Optional[StorageBackend] = None
