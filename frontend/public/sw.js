@@ -1,5 +1,5 @@
 // Simmer PWA service worker
-const CACHE_NAME = 'simmer-v1';
+const CACHE_NAME = 'simmer-v2';
 const APP_SHELL = [
   '/',
   '/index.html',
