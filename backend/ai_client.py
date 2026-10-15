@@ -143,9 +143,12 @@ class OllamaClient:
         return extract_json(raw_output)
 
     async def generate_with_image(
-        self, prompt: str, image_bytes: bytes
-    ) -> Union[dict, list, Any]:
-        """Generate text given an image and prompt, returning parsed JSON object/list."""
+        self, prompt: str, image_bytes: bytes, as_json: bool = True
+    ) -> Union[dict, list, str, Any]:
+        """Generate text given an image and prompt.
+
+        Returns parsed JSON by default. Set as_json=False for the raw sentence.
+        """
         if not image_bytes:
             raise ValueError("No image data provided.")
 
@@ -186,4 +189,6 @@ class OllamaClient:
             raise RuntimeError(f"Ollama vision generation failed: {exc}") from exc
 
         raw_output = data.get("response", "")
+        if not as_json:
+            return raw_output.strip()
         return extract_json(raw_output)
