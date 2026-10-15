@@ -41,13 +41,14 @@ async function handleResponse(response) {
 }
 
 /**
- * Suggest 3 doable dinner recipes based on ingredients, dislikes, and constraints.
+ * Suggest 3 recipes for a meal, from ingredients, dislikes, and constraints.
  * POST /api/suggest
  */
-export async function suggestRecipes(ingredients = [], dislikes = [], constraint = '', sessionId = '') {
+export async function suggestRecipes(ingredients = [], dislikes = [], constraint = '', sessionId = '', meal = 'dinner') {
   try {
     const response = await fetch(`${BASE_URL}/suggest`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         'X-Session-ID': sessionId,
@@ -56,6 +57,7 @@ export async function suggestRecipes(ingredients = [], dislikes = [], constraint
         ingredients,
         dislikes,
         constraint: constraint || null,
+        meal,
         session_id: sessionId,
         sessionId,
       }),
@@ -227,6 +229,42 @@ export async function deleteRecipe(recipeId, sessionId = '') {
  * Check backend server health.
  * GET /api/health
  */
+/**
+ * Load the kitchen session from Mongo. The response sets the session cookie.
+ * GET /api/session
+ * One shared request so a remount cannot create a second session.
+ */
+let sessionRequest = null;
+
+export function getSession() {
+  if (!sessionRequest) {
+    sessionRequest = fetch(`${BASE_URL}/session`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+      .then(handleResponse)
+      .catch((error) => {
+        sessionRequest = null;
+        throw error;
+      });
+  }
+  return sessionRequest;
+}
+
+/**
+ * Remember that this browser opened the kitchen.
+ * POST /api/session/enter
+ */
+export async function markEntered() {
+  const response = await fetch(`${BASE_URL}/session/enter`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return handleResponse(response);
+}
+
 export async function checkHealth() {
   try {
     const response = await fetch(`${BASE_URL}/health`, {
