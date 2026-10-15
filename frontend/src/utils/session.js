@@ -1,50 +1,26 @@
 /**
- * Session utility to handle persistent client session id without accounts.
- * Key stored in localStorage: 'simmer_session_id'
+ * Session id for the current page. The lasting copy lives in an HTTP cookie
+ * set by the API, and the free-meal count lives in Mongo.
  */
+const LEGACY_KEYS = [
+  'simmer_session_id',
+  'simmer_free_uses',
+  'simmer_entered',
+  'simmer_local_saved_recipes',
+];
 
-const SESSION_KEY = 'simmer_session_id';
-
-function generateUUID() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  // Fallback RFC4122 v4 UUID generator
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+try {
+  LEGACY_KEYS.forEach((key) => localStorage.removeItem(key));
+} catch {
+  // Private mode can block storage. The app no longer reads it.
 }
 
-/**
- * Retrieves the current session ID, or generates and stores a new one if not present.
- * @returns {string} The active session UUID
- */
+let currentSessionId = '';
+
 export function getSessionId() {
-  try {
-    let sessionId = localStorage.getItem(SESSION_KEY);
-    if (!sessionId) {
-      sessionId = generateUUID();
-      localStorage.setItem(SESSION_KEY, sessionId);
-    }
-    return sessionId;
-  } catch (error) {
-    console.warn('LocalStorage unavailable, generating ephemeral session ID:', error);
-    return generateUUID();
-  }
+  return currentSessionId;
 }
 
-/**
- * Clears or resets the current session ID if needed.
- * @returns {string} The newly created session UUID
- */
-export function resetSessionId() {
-  try {
-    const newId = generateUUID();
-    localStorage.setItem(SESSION_KEY, newId);
-    return newId;
-  } catch {
-    return generateUUID();
-  }
+export function setSessionId(sessionId) {
+  currentSessionId = sessionId || '';
 }
