@@ -12,6 +12,7 @@ export default function RecipeDetail({
 }) {
   const [checkedItems, setCheckedItems] = useState({});
   const [cookedSuccess, setCookedSuccess] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   if (!recipe) return null;
 
@@ -28,6 +29,17 @@ export default function RecipeDetail({
       ...prev,
       [item]: !prev[item],
     }));
+  };
+
+  const copyShoppingList = async () => {
+    const text = missingIngredients.map((item) => `• ${item}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
   };
 
   const handleCook = () => {
@@ -96,9 +108,18 @@ export default function RecipeDetail({
       {/* Quick Shopping List (Missing ingredients) */}
       {missingIngredients.length > 0 && (
         <div className="mb-6 p-4 rounded-xl bg-amber-soft border border-amber/30">
-          <h3 className="text-sm font-bold uppercase tracking-wider text-charcoal mb-2 flex items-center gap-1.5">
-            <span>🛒</span> Quick shopping list (tap to cross off)
-          </h3>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-charcoal flex items-center gap-1.5">
+              <span>🛒</span> Need to buy
+            </h3>
+            <button
+              type="button"
+              onClick={copyShoppingList}
+              className="text-xs font-black text-tomato px-3 py-1.5 rounded-full bg-white border border-tomato/30"
+            >
+              {copied ? 'Copied' : 'Copy list'}
+            </button>
+          </div>
           <ul className="space-y-2 mt-2">
             {missingIngredients.map((item, idx) => {
               const isChecked = !!checkedItems[item];
