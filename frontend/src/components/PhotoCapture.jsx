@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { getIngredientsFromPhoto } from '../utils/api.js';
 import { getSessionId } from '../utils/session.js';
 
@@ -14,10 +14,79 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
   const [errorMessage, setErrorMessage] = useState('');
   const [detectedItems, setDetectedItems] = useState([]);
 
+  const [cameraOn, setCameraOn] = useState(false);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const stopCamera = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setCameraOn(false);
+  };
+
+  useEffect(() => {
+    if (!isOpen) {
+      stopCamera();
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (cameraOn && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [cameraOn]);
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
 
   if (!isOpen) return null;
+
+  const handleOpenCamera = async () => {
+    setErrorMessage('');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      cameraInputRef.current?.click();
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' } },
+      });
+      streamRef.current = stream;
+      setCameraOn(true);
+    } catch (err) {
+      const blocked = err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError';
+      setErrorMessage(
+        blocked
+          ? 'Camera permission is blocked. Allow the camera for this site, or choose a photo from your library.'
+          : 'This device has no camera to open. Choose a photo from your library.'
+      );
+    }
+  };
+
+  const handleShutter = async () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')?.drawImage(video, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    if (!blob) return;
+
+    const file = new File([blob], 'fridge.jpg', { type: 'image/jpeg' });
+    stopCamera();
+    setSelectedImage(file);
+    setPreviewUrl(URL.createObjectURL(blob));
+    setDetectedItems([]);
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
@@ -38,6 +107,7 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
     setIsLoading(false);
     setErrorMessage('');
     setDetectedItems([]);
+    stopCamera();
   };
 
   const handleClose = () => {
@@ -54,12 +124,14 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
 
     try {
       const result = await getIngredientsFromPhoto(selectedImage, sessionId);
-      const items = result.ingredients || result.detected || [];
+      const items = result.is_food ? result.ingredients || [] : [];
 
       if (items.length > 0) {
         setDetectedItems(items);
       } else {
-        setErrorMessage("Couldn't read that photo — try a brighter shot with your fridge shelves in view.");
+        setErrorMessage(
+          result.message || "This photo isn't a fridge or ingredients. Snap the shelves, or type what you have."
+        );
       }
     } catch (err) {
       console.error('Fridge photo scan failed:', err);
@@ -119,7 +191,33 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
 
         {/* Content Body */}
         <div className="my-4 flex-1">
-          {!previewUrl ? (
+          {!previewUrl && cameraOn ? (
+            <div className="flex flex-col items-center">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full max-h-72 rounded-xl bg-black object-cover mb-4"
+              />
+              <div className="w-full flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleShutter}
+                  className="touch-target flex-1 py-3.5 px-4 bg-tomato text-white font-bold rounded-xl shadow-md"
+                >
+                  Snap
+                </button>
+                <button
+                  type="button"
+                  onClick={stopCamera}
+                  className="touch-target py-3.5 px-4 bg-white border border-charcoal-border text-charcoal font-semibold rounded-xl"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : !previewUrl ? (
             <div className="py-8 px-4 flex flex-col items-center text-center">
               <div className="w-24 h-24 mb-4 rounded-3xl bg-tomato-soft flex items-center justify-center text-tomato text-4xl shadow-inner">
                 🥫
@@ -132,7 +230,7 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
                 <button
                   type="button"
-                  onClick={() => cameraInputRef.current?.click()}
+                  onClick={handleOpenCamera}
                   className="touch-target w-full py-3.5 px-4 bg-tomato text-white font-bold rounded-xl shadow-md hover:bg-tomato-dark active:scale-95 transition-all flex items-center justify-center gap-2"
                 >
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -163,6 +261,9 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
                   <span>Choose from library</span>
                 </button>
               </div>
+              {errorMessage && (
+                <p className="mt-4 text-sm font-medium text-tomato-dark">{errorMessage}</p>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center">
@@ -219,6 +320,9 @@ export default function PhotoCapture({ isOpen, onClose, onIngredientsDetected })
                       Spotted {detectedItems.length} ingredients:
                     </span>
                   </div>
+                  <p className="text-xs text-basil-dark/80 mb-2">
+                    Check these before adding. A photo can miss an item or name one wrong.
+                  </p>
                   <div className="flex flex-wrap gap-1.5">
                     {detectedItems.map((item, idx) => (
                       <span
