@@ -8,7 +8,7 @@ import RecipeDetail from './RecipeDetail.jsx';
  * - Accordion expand/collapse on tap
  * - Highlights items from kitchen vs quick buy
  */
-export default function RecipeCards({ recipes = [], onCookRecipe, savedIds = [] }) {
+export default function RecipeCards({ recipes = [], onCookRecipe, savedIds = [], mealLabel = 'Dinner' }) {
   const [expandedIndex, setExpandedIndex] = useState(null);
 
   if (!recipes || recipes.length === 0) {
@@ -35,7 +35,7 @@ export default function RecipeCards({ recipes = [], onCookRecipe, savedIds = [] 
     <div className="w-full space-y-4">
       <div className="flex items-center justify-between px-1">
         <h3 className="text-xl font-black text-charcoal flex items-center gap-2">
-          <span>🍽️</span> 3 dinner ideas
+          <span>🍽️</span> 3 {mealLabel.toLowerCase()} ideas
         </h3>
         <span className="text-xs font-semibold text-charcoal-muted">
           Tap any card to cook
@@ -50,7 +50,7 @@ export default function RecipeCards({ recipes = [], onCookRecipe, savedIds = [] 
           const recipeId = recipe.id || recipe.recipe_id || `${recipe.name || recipe.title}-${index}`;
           const isSaved = savedIds.includes(recipeId);
 
-          const title = recipe.title || recipe.name || `Dinner Option #${index + 1}`;
+          const title = recipe.title || recipe.name || `${mealLabel} option ${index + 1}`;
           const time = recipe.time_min ? `${recipe.time_min} min` : (recipe.time || recipe.cook_time || '20 min');
           const difficulty = recipe.difficulty || 'Easy';
           const usedIngredients = recipe.uses || recipe.used_ingredients || recipe.usedIngredients || recipe.ingredients || [];
