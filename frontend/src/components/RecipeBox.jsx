@@ -76,7 +76,7 @@ export default function RecipeBox({
             Your recipe box is waiting!
           </h2>
           <p className="text-charcoal-muted text-sm max-w-sm mx-auto mb-6">
-            Save a dinner idea, or snap a recipe screenshot to keep it here.
+            Save a meal, or snap a recipe screenshot to keep it here.
           </p>
 
           <button
