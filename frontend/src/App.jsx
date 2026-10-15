@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import Home from './components/Home.jsx';
 import RecipeBox from './components/RecipeBox.jsx';
-import { getRecipeBox, deleteRecipe, checkHealth } from './utils/api.js';
-import { getSessionId } from './utils/session.js';
-
-const STORAGE_SAVED_KEY = 'simmer_local_saved_recipes';
+import Landing from './components/Landing.jsx';
+import YearlyOffer from './components/YearlyOffer.jsx';
+import { getRecipeBox, deleteRecipe, getSession, markEntered } from './utils/api.js';
+import { setSessionId } from './utils/session.js';
 
 /**
  * Main app container for the Simmer PWA.
@@ -15,8 +15,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('home'); // 'home' | 'box'
   const [savedRecipes, setSavedRecipes] = useState([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-
-  const sessionId = getSessionId();
+  const [showLanding, setShowLanding] = useState(true);
+  const [freeUsesRemaining, setFreeUsesRemaining] = useState(3);
+  const [showOffer, setShowOffer] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [sessionId, setSessionIdState] = useState('');
 
   // Monitor network connectivity
   useEffect(() => {
@@ -32,31 +35,41 @@ export default function App() {
     };
   }, []);
 
-  // Fetch initial recipe box on mount
   useEffect(() => {
     let isMounted = true;
 
-    async function fetchSaved() {
-      // First load local storage cache for instant render
+    async function loadSession() {
       try {
-        const cached = localStorage.getItem(STORAGE_SAVED_KEY);
-        if (cached && isMounted) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed)) {
-            setSavedRecipes(parsed);
-          }
-        }
+        const data = await getSession();
+        if (!isMounted) return;
+        setSessionId(data.session_id);
+        setSessionIdState(data.session_id);
+        setShowLanding(!data.entered);
+        setFreeUsesRemaining(data.free_uses_remaining);
       } catch (err) {
-        console.warn('LocalStorage read error:', err);
+        console.warn('Session load failed:', err.message);
+      } finally {
+        if (isMounted) setSessionReady(true);
       }
+    }
 
-      // Then sync from server
+    loadSession();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Fetch the recipe box once the session id is known
+  useEffect(() => {
+    if (!sessionId) return undefined;
+    let isMounted = true;
+
+    async function fetchSaved() {
       try {
         const data = await getRecipeBox(sessionId);
         const serverList = data.recipes || (Array.isArray(data) ? data : []);
-        if (isMounted && serverList.length > 0) {
+        if (isMounted) {
           setSavedRecipes(serverList);
-          localStorage.setItem(STORAGE_SAVED_KEY, JSON.stringify(serverList));
         }
       } catch (err) {
         console.warn('Server recipe box sync not available:', err.message);
@@ -85,23 +98,13 @@ export default function App() {
       if (exists) {
         return prev;
       }
-      const updated = [normalized, ...prev];
-      try {
-        localStorage.setItem(STORAGE_SAVED_KEY, JSON.stringify(updated));
-      } catch {}
-      return updated;
+      return [normalized, ...prev];
     });
   };
 
   // Delete recipe handler
   const handleDeleteRecipe = async (recipeId) => {
-    setSavedRecipes((prev) => {
-      const updated = prev.filter((r) => r.id !== recipeId);
-      try {
-        localStorage.setItem(STORAGE_SAVED_KEY, JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    setSavedRecipes((prev) => prev.filter((r) => r.id !== recipeId));
 
     try {
       await deleteRecipe(recipeId, sessionId);
@@ -111,6 +114,36 @@ export default function App() {
   };
 
   const savedRecipeIds = savedRecipes.map((r) => r.id);
+
+  const enterKitchen = async () => {
+    try {
+      const data = await markEntered();
+      setSessionId(data.session_id);
+      setSessionIdState(data.session_id);
+      setFreeUsesRemaining(data.free_uses_remaining);
+    } catch (err) {
+      console.warn('Could not save kitchen entry:', err.message);
+    }
+    setShowLanding(false);
+  };
+
+  const handleSuggestionUsed = (remaining) => {
+    if (typeof remaining === 'number') {
+      setFreeUsesRemaining(remaining);
+    }
+  };
+
+  if (!sessionReady) {
+    return (
+      <div className="min-h-screen bg-cream flex items-center justify-center font-sans">
+        <p className="text-sm font-bold text-charcoal-muted">Opening the kitchen…</p>
+      </div>
+    );
+  }
+
+  if (showLanding) {
+    return <Landing onEnter={enterKitchen} />;
+  }
 
   return (
     <div className="min-h-screen bg-cream flex flex-col font-sans selection:bg-tomato selection:text-white">
@@ -128,6 +161,9 @@ export default function App() {
           <Home
             onCookRecipe={handleSaveRecipe}
             savedRecipeIds={savedRecipeIds}
+            freeUsesRemaining={freeUsesRemaining}
+            onNeedSubscription={() => setShowOffer(true)}
+            onSuggestionUsed={handleSuggestionUsed}
           />
         )}
 
@@ -147,7 +183,7 @@ export default function App() {
             <span>🔒</span>
           </p>
           <p className="text-[11px] text-charcoal-light mt-0.5">
-            Zero accounts. Zero tracking. Just dinner.
+            Zero accounts. The next meal, from what you already have.
           </p>
         </footer>
       </main>
@@ -210,6 +246,16 @@ export default function App() {
           </button>
         </div>
       </nav>
+
+      {showOffer && (
+        <YearlyOffer
+          onClose={() => setShowOffer(false)}
+          onViewSaved={() => {
+            setShowOffer(false);
+            setActiveTab('box');
+          }}
+        />
+      )}
     </div>
   );
 }
