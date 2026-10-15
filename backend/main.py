@@ -8,9 +8,10 @@ from contextlib import asynccontextmanager
 import logging
 import os
 from typing import Any, Dict, List, Optional
+import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -20,7 +21,9 @@ load_dotenv()
 
 from ai_client import OllamaClient
 from prompts import (
+    MEAL_GUIDANCE,
     PHOTO_INGREDIENTS_PROMPT,
+    PHOTO_SCENE_PROMPT,
     RECIPE_SYSTEM_PROMPT,
     SCREENSHOT_RECIPE_PROMPT,
 )
@@ -32,6 +35,55 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("simmer")
+FREE_SUGGESTIONS = 3
+SESSION_COOKIE = "simmer_session"
+NOT_FOOD_MESSAGE = "This photo isn't a fridge or ingredients. Snap the shelves, or type what you have."
+_FOOD_SCENE_WORDS = frozenset(
+    {
+        "food",
+        "fridge",
+        "refrigerator",
+        "pantry",
+        "kitchen",
+        "counter",
+        "shelf",
+        "shelves",
+        "plate",
+        "bowl",
+        "ingredient",
+        "ingredients",
+        "vegetable",
+        "vegetables",
+        "fruit",
+        "fruits",
+        "grocery",
+        "groceries",
+        "produce",
+        "meal",
+    }
+)
+_SCREEN_SCENE_WORDS = frozenset(
+    {
+        "screen",
+        "screenshot",
+        "document",
+        "chat",
+        "editor",
+        "terminal",
+        "browser",
+        "laptop",
+        "monitor",
+        "code",
+    }
+)
+
+
+def _scene_is_food(sentence: str) -> bool:
+    cleaned = "".join(ch if ch.isalpha() else " " for ch in sentence.lower())
+    words = set(cleaned.split())
+    if words & _SCREEN_SCENE_WORDS:
+        return False
+    return bool(words & _FOOD_SCENE_WORDS)
 
 # Initialize AI client and Storage singleton
 ai_client = OllamaClient()
@@ -89,6 +141,9 @@ class SuggestRequest(BaseModel):
     constraint: Optional[str] = Field(
         None, description="Optional cooking constraint ('15-min', 'spicy', 'one-pot', 'veg', etc.)"
     )
+    meal: Optional[str] = Field(
+        None, description="Meal to cook: breakfast, lunch, snack, or dinner"
+    )
 
     class Config:
         populate_by_name = True
@@ -141,6 +196,38 @@ async def generic_exception_handler(request, exc: Exception):
 # API Endpoints
 # ---------------------------------------------------------
 
+def _session_view(record: Dict[str, Any]) -> Dict[str, Any]:
+    used = int(record.get("free_uses") or 0)
+    return {
+        "session_id": record["session_id"],
+        "entered": bool(record.get("entered")),
+        "free_uses": used,
+        "free_uses_remaining": max(0, FREE_SUGGESTIONS - used),
+    }
+
+
+def _with_session_cookie(payload: Dict[str, Any], session_id: str) -> JSONResponse:
+    response = JSONResponse(payload)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 365,
+        path="/",
+    )
+    return response
+
+
+def _resolve_session_id(request: Request, explicit: Optional[str] = None) -> str:
+    if explicit:
+        return explicit
+    cookie_id = request.cookies.get(SESSION_COOKIE)
+    if cookie_id:
+        return cookie_id
+    return str(uuid.uuid4())
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint reporting API, database, and Ollama status."""
@@ -150,6 +237,22 @@ async def health_check():
         "db_backend": storage.backend_name,
         "ollama": ollama_ok,
     }
+
+
+@app.get("/api/session")
+async def get_session(request: Request):
+    """Load or create the kitchen session stored in Mongo."""
+    session_id = _resolve_session_id(request)
+    record = await storage.get_or_create_session(session_id)
+    return _with_session_cookie(_session_view(record), record["session_id"])
+
+
+@app.post("/api/session/enter")
+async def enter_session(request: Request):
+    """Remember that this browser opened the kitchen."""
+    session_id = _resolve_session_id(request)
+    record = await storage.mark_entered(session_id)
+    return _with_session_cookie(_session_view(record), record["session_id"])
 
 
 @app.post("/api/ingredients-from-photo")
@@ -173,33 +276,49 @@ async def ingredients_from_photo(
                 detail="Uploaded image file is empty.",
             )
 
+        scene = await ai_client.generate_with_image(
+            prompt=PHOTO_SCENE_PROMPT,
+            image_bytes=image_bytes,
+            as_json=False,
+        )
+        if not isinstance(scene, str) or not _scene_is_food(scene):
+            logger.info("Photo rejected as not food: %s", scene)
+            return {
+                "is_food": False,
+                "ingredients": [],
+                "message": NOT_FOOD_MESSAGE,
+            }
+
         extracted = await ai_client.generate_with_image(
             prompt=PHOTO_INGREDIENTS_PROMPT,
             image_bytes=image_bytes,
         )
 
-        # Normalize extracted result to a list of strings
-        ingredients_list: List[str] = []
-        if isinstance(extracted, list):
-            ingredients_list = [str(item).strip() for item in extracted if str(item).strip()]
-        elif isinstance(extracted, dict):
-            # Model might return {"ingredients": [...]}
-            if "ingredients" in extracted and isinstance(extracted["ingredients"], list):
-                ingredients_list = [
-                    str(item).strip()
-                    for item in extracted["ingredients"]
-                    if str(item).strip()
-                ]
-            else:
-                # Collect any list found in dict values
-                for val in extracted.values():
-                    if isinstance(val, list):
-                        ingredients_list.extend(
-                            [str(item).strip() for item in val if str(item).strip()]
-                        )
-                        break
+        raw_items: List[Any] = []
+        if isinstance(extracted, dict) and isinstance(extracted.get("ingredients"), list):
+            raw_items = extracted["ingredients"]
+        elif isinstance(extracted, list):
+            raw_items = extracted
 
-        return {"ingredients": ingredients_list}
+        ingredients_list: List[str] = []
+        seen = set()
+        for item in raw_items:
+            name = str(item).strip().lower()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            ingredients_list.append(name)
+            if len(ingredients_list) >= 12:
+                break
+
+        if not ingredients_list:
+            return {
+                "is_food": False,
+                "ingredients": [],
+                "message": NOT_FOOD_MESSAGE,
+            }
+
+        return {"is_food": True, "ingredients": ingredients_list}
 
     except HTTPException:
         raise
@@ -222,17 +341,30 @@ async def ingredients_from_photo(
 
 
 @app.post("/api/suggest")
-async def suggest_recipes(body: SuggestRequest):
+async def suggest_recipes(body: SuggestRequest, request: Request):
     """Generate recipe suggestions matching available ingredients and preferences."""
+    session_id = _resolve_session_id(request, body.session_id)
+    record = await storage.get_or_create_session(session_id)
+    if int(record.get("free_uses") or 0) >= FREE_SUGGESTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Free meals used. The year is ₹99.",
+        )
+
     try:
         ingredients_str = ", ".join(body.ingredients) if body.ingredients else "None"
         dislikes_str = ", ".join(body.dislikes) if body.dislikes else "None"
         constraint_str = body.constraint if body.constraint else "None"
+        meal_key = (body.meal or "dinner").strip().lower()
+        if meal_key not in MEAL_GUIDANCE:
+            meal_key = "dinner"
 
         prompt = RECIPE_SYSTEM_PROMPT.format(
             ingredients=ingredients_str,
             dislikes=dislikes_str,
             constraint=constraint_str,
+            meal=meal_key,
+            meal_guidance=MEAL_GUIDANCE[meal_key],
         )
 
         model_response = await ai_client.generate_text(prompt)
@@ -246,23 +378,32 @@ async def suggest_recipes(body: SuggestRequest):
 
         # Auto-save current pantry
         await storage.save_pantry(
-            session_id=body.session_id,
+            session_id=session_id,
             ingredients=body.ingredients,
             dislikes=body.dislikes,
         )
 
         # Save suggestion run to history
         await storage.save_history(
-            session_id=body.session_id,
+            session_id=session_id,
             data={
                 "ingredients_used": body.ingredients,
-                "constraint_text": body.constraint,
+                "constraint_text": f"{meal_key}; {body.constraint or ''}".strip("; "),
                 "recipes": recipes,
                 "cooked": None,
             },
         )
 
-        return {"recipes": recipes}
+        if recipes:
+            record = await storage.increment_free_uses(session_id)
+
+        return _with_session_cookie(
+            {
+                "recipes": recipes,
+                "free_uses_remaining": max(0, FREE_SUGGESTIONS - int(record.get("free_uses") or 0)),
+            },
+            session_id,
+        )
 
     except HTTPException:
         raise
