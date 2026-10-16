@@ -5,9 +5,16 @@ photo ingredient extraction, and screenshot recipe saving.
 """
 
 from contextlib import asynccontextmanager
+import asyncio
+from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import io
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import uuid
 
 from dotenv import load_dotenv
@@ -27,6 +34,7 @@ from prompts import (
     RECIPE_SYSTEM_PROMPT,
     SCREENSHOT_RECIPE_PROMPT,
 )
+from receipts import send_receipt_email, smtp_configured
 from storage import StorageBackend, get_storage
 
 # Configure logging
@@ -36,8 +44,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("simmer")
 FREE_SUGGESTIONS = 3
+YEARLY_AMOUNT_INR = int(os.getenv("YEARLY_AMOUNT_INR", "99"))
 SESSION_COOKIE = "simmer_session"
+ADMIN_COOKIE = "simmer_admin"
 NOT_FOOD_MESSAGE = "This photo isn't a fridge or ingredients. Snap the shelves, or type what you have."
+UTR_PATTERN = re.compile(r"^[A-Za-z0-9]{8,22}$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _FOOD_SCENE_WORDS = frozenset(
     {
         "food",
@@ -158,6 +170,24 @@ class PantrySaveRequest(BaseModel):
         populate_by_name = True
 
 
+class PaymentClaimRequest(BaseModel):
+    session_id: Optional[str] = Field(None, alias="sessionId")
+    email: str
+    utr: str
+    note: Optional[str] = ""
+
+    class Config:
+        populate_by_name = True
+
+
+class AdminLoginRequest(BaseModel):
+    password: str
+
+
+class AdminToggleRequest(BaseModel):
+    paid: bool
+
+
 class RecipeItem(BaseModel):
     name: str
     time_min: int
@@ -196,13 +226,30 @@ async def generic_exception_handler(request, exc: Exception):
 # API Endpoints
 # ---------------------------------------------------------
 
+def _is_paid(record: Dict[str, Any]) -> bool:
+    paid_until = record.get("paid_until")
+    if not paid_until:
+        return False
+    try:
+        expiry = datetime.fromisoformat(str(paid_until).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry > datetime.now(timezone.utc)
+
+
 def _session_view(record: Dict[str, Any]) -> Dict[str, Any]:
     used = int(record.get("free_uses") or 0)
+    paid = _is_paid(record)
     return {
         "session_id": record["session_id"],
         "entered": bool(record.get("entered")),
         "free_uses": used,
-        "free_uses_remaining": max(0, FREE_SUGGESTIONS - used),
+        "free_uses_remaining": 999 if paid else max(0, FREE_SUGGESTIONS - used),
+        "is_paid": paid,
+        "paid_until": record.get("paid_until"),
+        "email": record.get("email"),
     }
 
 
@@ -226,6 +273,69 @@ def _resolve_session_id(request: Request, explicit: Optional[str] = None) -> str
     if cookie_id:
         return cookie_id
     return str(uuid.uuid4())
+
+
+def _admin_password() -> str:
+    return (os.getenv("ADMIN_PASSWORD") or "").strip()
+
+
+def _admin_token() -> str:
+    password = _admin_password()
+    if not password:
+        return ""
+    return hmac.new(password.encode("utf-8"), b"simmer-admin", hashlib.sha256).hexdigest()
+
+
+def _require_admin(request: Request) -> None:
+    expected = _admin_token()
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Set ADMIN_PASSWORD in backend/.env before using the admin page.",
+        )
+    if not hmac.compare_digest(request.cookies.get(ADMIN_COOKIE) or "", expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin login required.",
+        )
+
+
+def _upi_pay_uri() -> Optional[str]:
+    upi_id = (os.getenv("SIMMER_UPI_ID") or "").strip()
+    if not upi_id:
+        return None
+    payee = (os.getenv("SIMMER_UPI_NAME") or "Simmer").strip() or "Simmer"
+    note = (os.getenv("SIMMER_UPI_NOTE") or "Simmer year").strip() or "Simmer year"
+    return (
+        f"upi://pay?pa={quote(upi_id)}"
+        f"&pn={quote(payee)}"
+        f"&am={YEARLY_AMOUNT_INR}"
+        f"&cu=INR"
+        f"&tn={quote(note)}"
+    )
+
+
+def _upi_qr_data_url(upi_uri: str) -> Optional[str]:
+    try:
+        import qrcode
+    except ImportError:
+        logger.warning("qrcode package missing; UPI QR image unavailable.")
+        return None
+
+    import base64
+
+    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr.add_data(upi_uri)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _year_from_now() -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
 
 
 @app.get("/api/health")
@@ -340,12 +450,139 @@ async def ingredients_from_photo(
         ) from exc
 
 
+@app.get("/api/payment/info")
+async def payment_info():
+    """UPI details and QR for the yearly price."""
+    upi_uri = _upi_pay_uri()
+    upi_id = (os.getenv("SIMMER_UPI_ID") or "").strip()
+    return {
+        "amount_inr": YEARLY_AMOUNT_INR,
+        "currency": "INR",
+        "upi_id": upi_id or None,
+        "upi_uri": upi_uri,
+        "qr_data_url": _upi_qr_data_url(upi_uri) if upi_uri else None,
+        "payee_name": (os.getenv("SIMMER_UPI_NAME") or "Simmer").strip() or "Simmer",
+        "note": (os.getenv("SIMMER_UPI_NOTE") or "Simmer year").strip() or "Simmer year",
+        "configured": bool(upi_id),
+    }
+
+
+@app.post("/api/payment/claim")
+async def payment_claim(body: PaymentClaimRequest, request: Request):
+    """Visitor submits UTR + email after paying the UPI QR. Admin must toggle paid."""
+    session_id = _resolve_session_id(request, body.session_id)
+    await storage.get_or_create_session(session_id)
+
+    email = (body.email or "").strip().lower()
+    utr = (body.utr or "").strip().replace(" ", "").upper()
+    note = (body.note or "").strip()[:280]
+
+    if not EMAIL_PATTERN.match(email):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a valid email.")
+    if not UTR_PATTERN.match(utr):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter the UPI reference / UTR from your payment app (8–22 letters or digits).",
+        )
+
+    claim = await storage.create_payment_claim(
+        session_id=session_id,
+        email=email,
+        utr=utr,
+        note=note,
+    )
+    return {
+        "claim": claim,
+        "message": "Got it. After the UTR is confirmed on the admin page, this kitchen unlocks for a year.",
+    }
+
+
+@app.post("/api/admin/login")
+async def admin_login(body: AdminLoginRequest):
+    password = _admin_password()
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Set ADMIN_PASSWORD in backend/.env first.",
+        )
+    if not hmac.compare_digest(body.password.strip(), password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong password.")
+
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        key=ADMIN_COOKIE,
+        value=_admin_token(),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 12,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/admin/logout")
+async def admin_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(ADMIN_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/admin/claims")
+async def admin_list_claims(request: Request):
+    _require_admin(request)
+    claims = await storage.list_payment_claims(limit=200)
+    return {"claims": claims}
+
+
+@app.post("/api/admin/claims/{claim_id}/toggle")
+async def admin_toggle_claim(claim_id: str, body: AdminToggleRequest, request: Request):
+    """Flip paid on or off. When on, unlock the kitchen and email a PDF receipt."""
+    _require_admin(request)
+    existing = await storage.get_payment_claim(claim_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
+
+    paid_until = _year_from_now() if body.paid else None
+    claim = await storage.set_claim_paid(claim_id, paid=body.paid, paid_until=paid_until)
+
+    email_result: Dict[str, Any] = {"sent": False}
+    message = (
+        f"Marked paid until {paid_until}. That kitchen can cook without the free limit."
+        if body.paid
+        else "Paid access removed. Free-meal limit applies again."
+    )
+
+    if body.paid and claim:
+        if not smtp_configured():
+            email_result = {
+                "sent": False,
+                "error": "SMTP is not configured. Paid was saved, but no email went out.",
+            }
+            message += " Receipt email skipped: set SMTP_* in backend/.env."
+        else:
+            try:
+                sent = await asyncio.to_thread(send_receipt_email, claim, YEARLY_AMOUNT_INR)
+                email_result = {"sent": True, "to": sent.get("to")}
+                message += f" Receipt PDF emailed to {sent.get('to')}."
+            except Exception as exc:
+                logger.exception("Receipt email failed for claim %s", claim_id)
+                email_result = {"sent": False, "error": str(exc)}
+                message += f" Paid was saved, but the receipt email failed: {exc}"
+
+    return {
+        "claim": claim,
+        "message": message,
+        "email": email_result,
+    }
+
+
 @app.post("/api/suggest")
 async def suggest_recipes(body: SuggestRequest, request: Request):
     """Generate recipe suggestions matching available ingredients and preferences."""
     session_id = _resolve_session_id(request, body.session_id)
     record = await storage.get_or_create_session(session_id)
-    if int(record.get("free_uses") or 0) >= FREE_SUGGESTIONS:
+    paid = _is_paid(record)
+    if not paid and int(record.get("free_uses") or 0) >= FREE_SUGGESTIONS:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="Free meals used. The year is ₹99.",
@@ -394,13 +631,15 @@ async def suggest_recipes(body: SuggestRequest, request: Request):
             },
         )
 
-        if recipes:
+        if recipes and not paid:
             record = await storage.increment_free_uses(session_id)
 
+        view = _session_view(record)
         return _with_session_cookie(
             {
                 "recipes": recipes,
-                "free_uses_remaining": max(0, FREE_SUGGESTIONS - int(record.get("free_uses") or 0)),
+                "free_uses_remaining": view["free_uses_remaining"],
+                "is_paid": view["is_paid"],
             },
             session_id,
         )
