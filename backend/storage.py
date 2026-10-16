@@ -89,6 +89,34 @@ class StorageBackend(ABC):
         """Count one successful recipe suggestion against the free tier."""
         pass
 
+    @abstractmethod
+    async def create_payment_claim(
+        self,
+        session_id: str,
+        email: str,
+        utr: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        """Store a UPI payment claim waiting for admin review."""
+        pass
+
+    @abstractmethod
+    async def list_payment_claims(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """List payment claims, newest first."""
+        pass
+
+    @abstractmethod
+    async def get_payment_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch one payment claim by id."""
+        pass
+
+    @abstractmethod
+    async def set_claim_paid(
+        self, claim_id: str, paid: bool, paid_until: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Toggle a claim and mirror the paid year onto the kitchen session."""
+        pass
+
 
 class SqliteBackend(StorageBackend):
     """SQLite implementation of StorageBackend storing data in simmer.db."""
@@ -110,6 +138,13 @@ class SqliteBackend(StorageBackend):
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, typedef: str) -> None:
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in cursor.fetchall()}
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+
     def _init_db(self) -> None:
         """Initialize database schema synchronously."""
         with self._get_connection() as conn:
@@ -120,10 +155,29 @@ class SqliteBackend(StorageBackend):
                     session_id TEXT PRIMARY KEY,
                     entered INTEGER NOT NULL DEFAULT 0,
                     free_uses INTEGER NOT NULL DEFAULT 0,
+                    email TEXT,
+                    paid_until TEXT,
                     updated_at TEXT
                 );
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payment_claims (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    email TEXT,
+                    utr TEXT,
+                    note TEXT,
+                    status TEXT,
+                    paid_until TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+                """
+            )
+            self._ensure_column(cursor, "sessions", "email", "TEXT")
+            self._ensure_column(cursor, "sessions", "paid_until", "TEXT")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pantries (
@@ -400,12 +454,35 @@ class SqliteBackend(StorageBackend):
             return await asyncio.to_thread(_query)
 
     def _session_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        keys = row.keys()
         return {
             "session_id": row["session_id"],
             "entered": bool(row["entered"]),
             "free_uses": int(row["free_uses"] or 0),
+            "email": row["email"] if "email" in keys else None,
+            "paid_until": row["paid_until"] if "paid_until" in keys else None,
             "updated_at": row["updated_at"],
         }
+
+    def _claim_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "email": row["email"],
+            "utr": row["utr"],
+            "note": row["note"] or "",
+            "status": row["status"],
+            "paid_until": row["paid_until"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _fetch_session(self, cursor: sqlite3.Cursor, session_id: str) -> Dict[str, Any]:
+        cursor.execute(
+            "SELECT session_id, entered, free_uses, email, paid_until, updated_at FROM sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        return self._session_from_row(cursor.fetchone())
 
     async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
         updated_at = datetime.now(timezone.utc).isoformat()
@@ -422,11 +499,7 @@ class SqliteBackend(StorageBackend):
                     (session_id, updated_at),
                 )
                 conn.commit()
-                cursor.execute(
-                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                )
-                return self._session_from_row(cursor.fetchone())
+                return self._fetch_session(cursor, session_id)
 
         async with self._lock:
             return await asyncio.to_thread(_op)
@@ -448,11 +521,7 @@ class SqliteBackend(StorageBackend):
                     (session_id, updated_at),
                 )
                 conn.commit()
-                cursor.execute(
-                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                )
-                return self._session_from_row(cursor.fetchone())
+                return self._fetch_session(cursor, session_id)
 
         async with self._lock:
             return await asyncio.to_thread(_op)
@@ -474,11 +543,128 @@ class SqliteBackend(StorageBackend):
                     (session_id, updated_at),
                 )
                 conn.commit()
+                return self._fetch_session(cursor, session_id)
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def create_payment_claim(
+        self,
+        session_id: str,
+        email: str,
+        utr: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        claim_id = str(uuid.uuid4())
+
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT session_id, entered, free_uses, updated_at FROM sessions WHERE session_id = ?",
-                    (session_id,),
+                    """
+                    INSERT INTO payment_claims
+                    (id, session_id, email, utr, note, status, paid_until, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                    """,
+                    (claim_id, session_id, email, utr, note, now, now),
                 )
-                return self._session_from_row(cursor.fetchone())
+                cursor.execute(
+                    """
+                    UPDATE sessions SET email = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (email, now, session_id),
+                )
+                conn.commit()
+                cursor.execute(
+                    "SELECT id, session_id, email, utr, note, status, paid_until, created_at, updated_at FROM payment_claims WHERE id = ?",
+                    (claim_id,),
+                )
+                return self._claim_from_row(cursor.fetchone())
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def list_payment_claims(self, limit: int = 100) -> List[Dict[str, Any]]:
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, session_id, email, utr, note, status, paid_until, created_at, updated_at
+                    FROM payment_claims
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [self._claim_from_row(row) for row in cursor.fetchall()]
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def get_payment_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, session_id, email, utr, note, status, paid_until, created_at, updated_at
+                    FROM payment_claims WHERE id = ?
+                    """,
+                    (claim_id,),
+                )
+                row = cursor.fetchone()
+                return self._claim_from_row(row) if row else None
+
+        async with self._lock:
+            return await asyncio.to_thread(_op)
+
+    async def set_claim_paid(
+        self, claim_id: str, paid: bool, paid_until: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        now = datetime.now(timezone.utc).isoformat()
+        status = "paid" if paid else "pending"
+
+        def _op():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, session_id, email, utr, note, status, paid_until, created_at, updated_at
+                    FROM payment_claims WHERE id = ?
+                    """,
+                    (claim_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                cursor.execute(
+                    """
+                    UPDATE payment_claims
+                    SET status = ?, paid_until = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, paid_until if paid else None, now, claim_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE sessions
+                    SET email = ?, paid_until = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (row["email"], paid_until if paid else None, now, row["session_id"]),
+                )
+                conn.commit()
+                cursor.execute(
+                    """
+                    SELECT id, session_id, email, utr, note, status, paid_until, created_at, updated_at
+                    FROM payment_claims WHERE id = ?
+                    """,
+                    (claim_id,),
+                )
+                return self._claim_from_row(cursor.fetchone())
 
         async with self._lock:
             return await asyncio.to_thread(_op)
@@ -508,6 +694,10 @@ class MongoBackend(StorageBackend):
             [("session_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)]
         )
         self.db.sessions.create_index([("session_id", pymongo.ASCENDING)], unique=True)
+        self.db.payment_claims.create_index(
+            [("created_at", pymongo.DESCENDING)]
+        )
+        self.db.payment_claims.create_index([("utr", pymongo.ASCENDING)])
 
     @property
     def backend_name(self) -> str:
@@ -663,6 +853,96 @@ class MongoBackend(StorageBackend):
 
         return await asyncio.to_thread(_op)
 
+    async def create_payment_claim(
+        self,
+        session_id: str,
+        email: str,
+        utr: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        doc = {
+            "id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "email": email,
+            "utr": utr,
+            "note": note or "",
+            "status": "pending",
+            "paid_until": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        def _op():
+            self.db.payment_claims.insert_one(dict(doc))
+            self.db.sessions.update_one(
+                {"session_id": session_id},
+                {
+                    "$set": {"email": email, "updated_at": now},
+                    "$setOnInsert": {
+                        "entered": False,
+                        "free_uses": 0,
+                        "session_id": session_id,
+                    },
+                },
+                upsert=True,
+            )
+            return {k: v for k, v in doc.items()}
+
+        return await asyncio.to_thread(_op)
+
+    async def list_payment_claims(self, limit: int = 100) -> List[Dict[str, Any]]:
+        def _op():
+            cursor = (
+                self.db.payment_claims.find({}, {"_id": 0})
+                .sort("created_at", -1)
+                .limit(limit)
+            )
+            return list(cursor)
+
+        return await asyncio.to_thread(_op)
+
+    async def get_payment_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
+        def _op():
+            return self.db.payment_claims.find_one({"id": claim_id}, {"_id": 0})
+
+        return await asyncio.to_thread(_op)
+
+    async def set_claim_paid(
+        self, claim_id: str, paid: bool, paid_until: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        now = datetime.now(timezone.utc).isoformat()
+        status = "paid" if paid else "pending"
+
+        def _op():
+            claim = self.db.payment_claims.find_one({"id": claim_id}, {"_id": 0})
+            if not claim:
+                return None
+            self.db.payment_claims.update_one(
+                {"id": claim_id},
+                {
+                    "$set": {
+                        "status": status,
+                        "paid_until": paid_until if paid else None,
+                        "updated_at": now,
+                    }
+                },
+            )
+            self.db.sessions.update_one(
+                {"session_id": claim["session_id"]},
+                {
+                    "$set": {
+                        "email": claim["email"],
+                        "paid_until": paid_until if paid else None,
+                        "updated_at": now,
+                    }
+                },
+                upsert=True,
+            )
+            return self.db.payment_claims.find_one({"id": claim_id}, {"_id": 0})
+
+        return await asyncio.to_thread(_op)
+
 
 class InMemoryBackend(StorageBackend):
     """In-memory dictionary fallback backend."""
@@ -672,6 +952,7 @@ class InMemoryBackend(StorageBackend):
         self._recipe_box: Dict[str, Dict[str, Any]] = {}
         self._history: List[Dict[str, Any]] = []
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._claims: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -792,6 +1073,71 @@ class InMemoryBackend(StorageBackend):
             doc["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._sessions[session_id] = doc
             return dict(doc)
+
+    async def create_payment_claim(
+        self,
+        session_id: str,
+        email: str,
+        utr: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            doc = {
+                "id": str(uuid.uuid4()),
+                "session_id": session_id,
+                "email": email,
+                "utr": utr,
+                "note": note or "",
+                "status": "pending",
+                "paid_until": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._claims[doc["id"]] = doc
+            session = self._sessions.get(session_id) or {
+                "session_id": session_id,
+                "entered": False,
+                "free_uses": 0,
+            }
+            session["email"] = email
+            session["updated_at"] = now
+            self._sessions[session_id] = session
+            return dict(doc)
+
+    async def list_payment_claims(self, limit: int = 100) -> List[Dict[str, Any]]:
+        async with self._lock:
+            items = [dict(c) for c in self._claims.values()]
+            items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return items[:limit]
+
+    async def get_payment_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            doc = self._claims.get(claim_id)
+            return dict(doc) if doc else None
+
+    async def set_claim_paid(
+        self, claim_id: str, paid: bool, paid_until: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            claim = self._claims.get(claim_id)
+            if not claim:
+                return None
+            claim["status"] = "paid" if paid else "pending"
+            claim["paid_until"] = paid_until if paid else None
+            claim["updated_at"] = now
+            session = self._sessions.get(claim["session_id"]) or {
+                "session_id": claim["session_id"],
+                "entered": False,
+                "free_uses": 0,
+            }
+            session["email"] = claim["email"]
+            session["paid_until"] = paid_until if paid else None
+            session["updated_at"] = now
+            self._sessions[claim["session_id"]] = session
+            self._claims[claim_id] = claim
+            return dict(claim)
 
 
 _storage_singleton: Optional[StorageBackend] = None
