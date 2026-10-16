@@ -26,6 +26,7 @@ export default function Home({
   onCookRecipe,
   savedRecipeIds = [],
   freeUsesRemaining = 3,
+  isPaid = false,
   onNeedSubscription,
   onSuggestionUsed,
 }) {
@@ -154,7 +155,7 @@ export default function Home({
 
   // Main Suggest action
   const handleFeedMeRecipes = async () => {
-    if (freeUsesRemaining <= 0) {
+    if (!isPaid && freeUsesRemaining <= 0) {
       onNeedSubscription?.();
       return;
     }
@@ -193,7 +194,7 @@ export default function Home({
       const returnedRecipes = result.recipes || result.suggestions || (Array.isArray(result) ? result : []);
 
       if (returnedRecipes.length > 0) {
-        onSuggestionUsed?.(result.free_uses_remaining);
+        onSuggestionUsed?.(result.free_uses_remaining, result.is_paid);
         setRecipes(returnedRecipes);
         // Gently scroll to recipes
         setTimeout(() => {
@@ -437,9 +438,11 @@ export default function Home({
           )}
         </button>
         <p className="text-center text-xs font-bold text-charcoal-muted -mt-2">
-          {freeUsesRemaining > 0
-            ? `${freeUsesRemaining} free meal${freeUsesRemaining === 1 ? '' : 's'} left, then ₹99 for the year`
-            : 'Free meals used. The year is ₹99.'}
+          {isPaid
+            ? 'Year unlocked. Cook as many meals as you need.'
+            : freeUsesRemaining > 0
+              ? `${freeUsesRemaining} free meal${freeUsesRemaining === 1 ? '' : 's'} left, then ₹99 for the year`
+              : 'Free meals used. The year is ₹99.'}
         </p>
       </section>
 
