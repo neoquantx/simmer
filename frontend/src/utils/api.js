@@ -279,3 +279,76 @@ export async function checkHealth() {
     return { status: 'down', error: error.message };
   }
 }
+
+export async function getPaymentInfo() {
+  const response = await fetch(`${BASE_URL}/payment/info`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return handleResponse(response);
+}
+
+export async function submitPaymentClaim({ email, utr, note = '', sessionId = '' }) {
+  const response = await fetch(`${BASE_URL}/payment/claim`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'X-Session-ID': sessionId,
+    },
+    body: JSON.stringify({
+      email,
+      utr,
+      note,
+      session_id: sessionId,
+      sessionId,
+    }),
+  });
+  return handleResponse(response);
+}
+
+export async function adminLogin(password) {
+  const response = await fetch(`${BASE_URL}/admin/login`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  });
+  return handleResponse(response);
+}
+
+export async function adminLogout() {
+  const response = await fetch(`${BASE_URL}/admin/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return handleResponse(response);
+}
+
+export async function listPaymentClaims() {
+  const response = await fetch(`${BASE_URL}/admin/claims`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return handleResponse(response);
+}
+
+export async function togglePaymentClaim(claimId, paid) {
+  const response = await fetch(`${BASE_URL}/admin/claims/${encodeURIComponent(claimId)}/toggle`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ paid }),
+  });
+  return handleResponse(response);
+}
