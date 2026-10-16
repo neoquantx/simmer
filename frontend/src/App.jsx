@@ -17,6 +17,7 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [showLanding, setShowLanding] = useState(true);
   const [freeUsesRemaining, setFreeUsesRemaining] = useState(3);
+  const [isPaid, setIsPaid] = useState(false);
   const [showOffer, setShowOffer] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [sessionId, setSessionIdState] = useState('');
@@ -45,7 +46,8 @@ export default function App() {
         setSessionId(data.session_id);
         setSessionIdState(data.session_id);
         setShowLanding(!data.entered);
-        setFreeUsesRemaining(data.free_uses_remaining);
+        setIsPaid(Boolean(data.is_paid));
+        setFreeUsesRemaining(data.is_paid ? 999 : data.free_uses_remaining);
       } catch (err) {
         console.warn('Session load failed:', err.message);
       } finally {
@@ -120,17 +122,26 @@ export default function App() {
       const data = await markEntered();
       setSessionId(data.session_id);
       setSessionIdState(data.session_id);
-      setFreeUsesRemaining(data.free_uses_remaining);
+      setIsPaid(Boolean(data.is_paid));
+      setFreeUsesRemaining(data.is_paid ? 999 : data.free_uses_remaining);
     } catch (err) {
       console.warn('Could not save kitchen entry:', err.message);
     }
     setShowLanding(false);
   };
 
-  const handleSuggestionUsed = (remaining) => {
-    if (typeof remaining === 'number') {
-      setFreeUsesRemaining(remaining);
+  const handleSuggestionUsed = (remaining, paid) => {
+    if (typeof paid === 'boolean') {
+      setIsPaid(paid);
     }
+    if (typeof remaining === 'number') {
+      setFreeUsesRemaining(paid ? 999 : remaining);
+    }
+  };
+
+  const handleNeedSubscription = () => {
+    if (isPaid) return;
+    setShowOffer(true);
   };
 
   if (!sessionReady) {
@@ -151,7 +162,7 @@ export default function App() {
       {!isOnline && (
         <div className="bg-charcoal text-cream text-xs font-bold text-center py-1.5 px-4 sticky top-0 z-50 flex items-center justify-center gap-1.5 shadow-sm">
           <span>📡</span>
-          <span>Offline mode active. Your saved recipes are always ready!</span>
+          <span>You're offline. Simmer needs a connection to suggest meals.</span>
         </div>
       )}
 
@@ -162,7 +173,8 @@ export default function App() {
             onCookRecipe={handleSaveRecipe}
             savedRecipeIds={savedRecipeIds}
             freeUsesRemaining={freeUsesRemaining}
-            onNeedSubscription={() => setShowOffer(true)}
+            isPaid={isPaid}
+            onNeedSubscription={handleNeedSubscription}
             onSuggestionUsed={handleSuggestionUsed}
           />
         )}
@@ -247,7 +259,7 @@ export default function App() {
         </div>
       </nav>
 
-      {showOffer && (
+      {showOffer && !isPaid && (
         <YearlyOffer
           onClose={() => setShowOffer(false)}
           onViewSaved={() => {
