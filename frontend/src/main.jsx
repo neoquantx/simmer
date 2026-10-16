@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import Admin from './components/Admin.jsx';
 import './index.css';
 
 // Register Service Worker for PWA support
@@ -17,8 +18,10 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+const isAdmin = window.location.pathname.replace(/\/+$/, '') === '/admin';
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <App />
+    {isAdmin ? <Admin /> : <App />}
   </React.StrictMode>
 );
