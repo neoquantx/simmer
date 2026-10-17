@@ -200,6 +200,23 @@ export async function getRecipeBox(sessionId = '') {
 }
 
 /**
+ * Save a recipe into the recipe box.
+ * POST /api/recipe-box
+ */
+export async function saveRecipe(recipe, sessionId = '') {
+  const response = await fetch(`${BASE_URL}/recipe-box`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-ID': sessionId,
+    },
+    body: JSON.stringify({ session_id: sessionId, sessionId, recipe }),
+  });
+  return handleResponse(response);
+}
+
+/**
  * Delete a recipe from the recipe box.
  * DELETE /api/recipe-box/{id}
  */
