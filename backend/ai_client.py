@@ -89,12 +89,15 @@ class OllamaClient:
         self,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
     ):
         raw_base_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.base_url = raw_base_url.rstrip("/")
         self.model = model or os.getenv("OLLAMA_MODEL", "gemma3:4b")
-        self.timeout = httpx.Timeout(timeout, connect=10.0)
+        self.timeout_seconds = timeout or float(os.getenv("OLLAMA_TIMEOUT", "240"))
+        self.timeout = httpx.Timeout(self.timeout_seconds, connect=10.0)
+        # Ollama unloads an idle model after 5 minutes; reloading adds to the next request.
+        self.keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
     async def check_health(self) -> bool:
         """Check if Ollama server is reachable."""
@@ -112,6 +115,7 @@ class OllamaClient:
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": self.keep_alive,
         }
 
         url = f"{self.base_url}/api/generate"
@@ -128,8 +132,10 @@ class OllamaClient:
                 f"Failed to connect to Ollama at {self.base_url}. Please ensure Ollama is running."
             ) from exc
         except httpx.TimeoutException as exc:
-            logger.error(f"Ollama request timed out after {self.timeout}s: {exc}")
-            raise TimeoutError("Ollama generation timed out after 120 seconds.") from exc
+            logger.error(f"Ollama request timed out after {self.timeout_seconds:.0f}s: {exc}")
+            raise TimeoutError(
+                f"Ollama generation timed out after {self.timeout_seconds:.0f} seconds."
+            ) from exc
         except httpx.HTTPStatusError as exc:
             logger.error(f"Ollama returned HTTP error: {exc.response.status_code} - {exc.response.text}")
             raise RuntimeError(
@@ -159,6 +165,7 @@ class OllamaClient:
             "prompt": prompt,
             "images": [b64_image],
             "stream": False,
+            "keep_alive": self.keep_alive,
         }
 
         url = f"{self.base_url}/api/generate"
@@ -178,7 +185,9 @@ class OllamaClient:
             ) from exc
         except httpx.TimeoutException as exc:
             logger.error(f"Ollama vision request timed out: {exc}")
-            raise TimeoutError("Ollama vision generation timed out after 120 seconds.") from exc
+            raise TimeoutError(
+                f"Ollama vision generation timed out after {self.timeout_seconds:.0f} seconds."
+            ) from exc
         except httpx.HTTPStatusError as exc:
             logger.error(f"Ollama returned HTTP error: {exc.response.status_code} - {exc.response.text}")
             raise RuntimeError(
