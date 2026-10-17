@@ -8,6 +8,8 @@ The model runs locally through [Ollama](https://ollama.com) (Gemma 3 4B). A frid
 
 > Try 3 meals free. Then ₹99 for the year.
 
+Built for the [DEV Hacktoberfest Open-Source AI Challenge, Week 2: Side Hustle](https://dev.to/challenges/hacktoberfest-week2-2026-10-12).
+
 ![Simmer landing page](docs/screenshots/01-landing.png)
 
 ## Contents
@@ -28,6 +30,8 @@ The model runs locally through [Ollama](https://ollama.com) (Gemma 3 4B). A frid
 - [Troubleshooting](#troubleshooting)
 - [Known limits](#known-limits)
 - [Privacy](#privacy)
+- [Challenge timeline](#challenge-timeline)
+- [License](#license)
 
 ## Features
 
@@ -149,6 +153,15 @@ Copy `backend/.env.example` and edit it. This file is ignored by git. Never comm
 | `MONGO_URI` | none | Atlas connection string. Used only when `DB_BACKEND=mongo` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Where Ollama is running |
 | `OLLAMA_MODEL` | `gemma3:4b` | The model used for text and photos |
+| `OLLAMA_TIMEOUT` | `240` | Seconds the API waits for one model answer |
+| `OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded after a request |
+| `SIMMER_UPI_ID` | none | Your UPI ID for the yearly QR. The offer shows no QR until it is set |
+| `SIMMER_UPI_NAME` | `Simmer` | Payee name shown in UPI apps |
+| `SIMMER_UPI_NOTE` | `Simmer year` | Payment note in UPI apps |
+| `YEARLY_AMOUNT_INR` | `99` | Yearly price |
+| `ADMIN_PASSWORD` | none | Password for the `/admin` page. Change it before the site is public |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | none | Mail account that sends PDF receipts |
+| `SUPPORT_EMAIL` | `SMTP_FROM` | Contact address printed on receipts |
 
 If MongoDB cannot be reached, the API falls back to SQLite, then to memory, and keeps running. Check `db_backend` in `/api/health` to see which one is active.
 
@@ -169,17 +182,11 @@ MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/simmer?retryWrit
 
 If the password has characters such as `@`, `#`, or `/`, URL-encode them in the string.
 
-Collections created by the app: `sessions`, `pantries`, `recipe_box`, and `history`.
+Home internet connections often change IP address. When that happens, Atlas refuses the connection and the API falls back to SQLite. Add the new address in Network Access, or allow access from anywhere for a demo.
+
+Collections created by the app: `sessions`, `pantries`, `recipe_box`, `history`, and `payment_claims`.
 
 ![MongoDB Atlas collections](docs/screenshots/08-mongodb-atlas.png)
-
-### Frontend: `frontend/.env` (optional)
-
-| Variable | Purpose |
-|---|---|
-| `VITE_PAYMENT_URL` | Hosted payment page opened by the yearly offer button. While it is empty, the button stays disabled. |
-
-Restart `npm run dev` after changing it.
 
 ## Using Simmer
 
@@ -195,12 +202,14 @@ A visitor gets **three free suggestions**. Each one returns three recipes. The c
 
 ![Yearly offer](docs/screenshots/06-yearly-offer.png)
 
-**Current status.** The free-meal counter is live. Yearly access uses a **UPI QR + UTR claim**:
+Yearly access uses a **UPI QR and a UTR claim**:
 
-1. The visitor pays ₹99 with the QR (or the UPI deep link).
-2. They paste the UTR and an email.
-3. You open **http://localhost:5173/admin** (frontend must be running), confirm the credit in your UPI app, and flip **Paid**.
+1. The visitor pays ₹99 with the QR, or with the UPI deep link on a phone.
+2. They paste the UTR from their UPI app and an email address.
+3. You open **http://localhost:5173/admin**, find that UTR in your own UPI app, and switch the claim to **Paid**.
 4. That kitchen unlocks for one year, and Simmer emails a **PDF receipt** to the address they entered.
+
+Nothing unlocks until you confirm the money arrived. Switching a claim back to pending removes the year again.
 
 Set these in `backend/.env`, then restart the API:
 
@@ -246,7 +255,13 @@ All routes are under `/api`. Session routes read and set a `simmer_session` cook
 | `POST` | `/api/save-from-screenshot` | Extract a recipe from a screenshot and save it |
 | `GET` / `POST` | `/api/pantry` | Read or save ingredients and dislikes |
 | `GET` | `/api/recipe-box` | Saved recipes |
+| `POST` | `/api/recipe-box` | Save a suggested recipe |
 | `DELETE` | `/api/recipe-box/{id}` | Remove a saved recipe |
+| `GET` | `/api/payment/info` | Yearly price, UPI ID, and the QR image |
+| `POST` | `/api/payment/claim` | Submit a UTR and email after paying |
+| `POST` | `/api/admin/login` | Admin sign-in with `ADMIN_PASSWORD` |
+| `GET` | `/api/admin/claims` | List payment claims (admin only) |
+| `POST` | `/api/admin/claims/{id}/toggle` | Mark a claim paid or pending. Paid sends the receipt (admin only) |
 
 Example suggestion request:
 
@@ -256,22 +271,24 @@ curl -X POST http://localhost:8000/api/suggest \
   -d '{"ingredients":["eggs","rice","onion"],"meal":"breakfast","session_id":"demo"}'
 ```
 
-A local model is slow. A suggestion can take tens of seconds, and a photo read about as long. That is normal.
+A local model is slow. On an 8 GB MacBook Air, one suggestion takes about a minute, and a photo read takes 10 to 30 seconds. That is normal.
 
 ## Project structure
 
 ```text
 backend/
-  main.py            Routes, session handling, free-meal limit
+  main.py            Routes, sessions, free-meal limit, payments, admin
   ai_client.py       Ollama client (text and vision)
   prompts.py         Model prompts, including meal guidance
   storage.py         MongoDB, SQLite, and in-memory storage
+  receipts.py        PDF receipt and email
   requirements.txt
   .env.example       Config template
 frontend/
   src/
     App.jsx          Session load, landing, tabs
-    components/      Landing, Home, PhotoCapture, RecipeCards, RecipeBox, YearlyOffer
+    main.jsx         Opens the admin page on /admin
+    components/      Landing, Home, PhotoCapture, RecipeCards, RecipeBox, YearlyOffer, Admin
     utils/           API client, meal helpers, session id
   public/            Manifest, service worker, icons
 docs/
@@ -285,7 +302,8 @@ Running on your own computer works with no extra setup. Putting it on the intern
 - **HTTPS.** Required for the camera on phones and for installing the app.
 - **A machine that can run the model.** Gemma 3 4B needs several gigabytes of memory while it answers. A small web host cannot hold it. Speed matters too: a computer without a graphics chip answers much more slowly than a laptop that has one, so measure before relying on it.
 - **One address for the site and the API.** Serve the built site (`npm run build`) and forward `/api` to the API behind the same reverse proxy.
-- **Long proxy timeouts.** Many proxies cut a request at 60 seconds. A model answer can take longer. The API itself waits up to 120 seconds for the model.
+- **Long proxy timeouts.** Many proxies cut a request at 60 seconds. A model answer can take longer. The API itself waits up to `OLLAMA_TIMEOUT` seconds, 240 by default.
+- **A real admin password.** Set `ADMIN_PASSWORD` to something only you know before anyone else can reach `/admin`.
 - **A cookie marked `Secure`.** Add the `Secure` flag to the session cookie once the site is on HTTPS.
 - **Ollama private.** Keep Ollama on `localhost`. It has no login of its own.
 - **Atlas access.** Allow the server's IP address in MongoDB Network Access.
@@ -299,10 +317,14 @@ Requests are handled one after another by default, so many visitors at the same 
 |---|---|
 | `ollama serve` says `address already in use` | Ollama is already running. Leave it. |
 | `/api/health` shows `"ollama": false` | Start Ollama, then check `OLLAMA_BASE_URL`. |
+| `python main.py` says `[Errno 48] Address already in use` | An older API is still running on port 8000. Stop it with `lsof -ti tcp:8000 \| xargs kill`, then start again. |
 | `/api/health` shows `sqlite` but you want Mongo | `DB_BACKEND` is not `mongo`, or the connection failed and the API fell back. Fix `MONGO_URI` and restart. |
-| Atlas connection times out | Your IP address is not in Network Access. |
+| Atlas fails with `TLSV1_ALERT_INTERNAL_ERROR` or times out | Your IP address is not in Network Access. Home IPs change, so add the new one and restart the API. |
+| `/admin` does not load | The web app is not running. Start `npm run dev` in `frontend`. |
+| Receipt email fails | Check the `SMTP_*` values. Gmail needs an App Password, not your normal password. |
 | Suggestion returns `402` | The session has used its three free meals. |
-| Suggestion is very slow | The model is running on the CPU. Close other heavy apps, or use a machine with a graphics chip. |
+| Suggestion returns `504` | The model took longer than `OLLAMA_TIMEOUT`. Close heavy apps to free memory, or raise the timeout. |
+| Suggestion is very slow | The model is short on memory or running on the CPU. Close other heavy apps, or use a machine with more memory. |
 | No camera prompt | Camera access needs HTTPS or `localhost`. Check the browser's site settings for a blocked camera. |
 | `ERROR:root:code for hash blake2b was not found` | A warning from some Python builds. The server still starts. |
 | The page looks out of date | The service worker caches the app. Reload twice, or clear site data. |
@@ -310,11 +332,24 @@ Requests are handled one after another by default, so many visitors at the same 
 ## Known limits
 
 - **Photo reading is a guess.** A 4B model can miss an item or name one wrong. Simmer asks you to confirm the ingredients, and it refuses photos that do not look like food. The check is a heuristic, so it is not perfect.
-- **Free meals are a soft limit.** The count is tied to a cookie. Clearing cookies starts a new kitchen, and a direct call to the API can supply its own session. Paid access needs a server-side check before it is trusted.
-- **Checkout and receipts are not built yet.** See [Free meals and payments](#free-meals-and-payments).
+- **Free meals are a soft limit.** The count is tied to a cookie. Clearing cookies starts a new kitchen, and a direct call to the API can supply its own session.
+- **Payments are confirmed by hand.** You check each UTR in your UPI app. There is no payment gateway, so nothing is confirmed automatically.
+- **Paid access stays on one device.** The year is tied to the kitchen that sent the UTR. Restoring it on a new phone by email is not built yet.
 - **Needs a connection.** Suggestions, photos, saved recipes, and the free-meal count all come from the API. The installed app opens offline, but it cannot cook until it is back online.
 - **Fonts load from Google Fonts.** The first load needs the internet.
 
 ## Privacy
 
 There are no accounts. Photos are analysed by the model you run, and Simmer does not store the photo. The database keeps a random session id, the free-meal count, your pantry, your saved recipes, and a history of suggestions. Nothing is sent to a third-party AI service.
+
+If someone pays, Simmer also stores the email and UTR they entered, so the payment can be checked and the receipt sent. The receipt goes out through the mail account set in `SMTP_*`.
+
+## Challenge timeline
+
+Simmer was started on October 14, 2026, inside the Week 2 window (October 12 to October 18, 2026, 11:59 PM PDT).
+
+Changes made after the submission deadline will be listed here.
+
+## License
+
+[MIT](LICENSE) © 2026 Himanshu Nikam
