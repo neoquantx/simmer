@@ -3,7 +3,7 @@ import Home from './components/Home.jsx';
 import RecipeBox from './components/RecipeBox.jsx';
 import Landing from './components/Landing.jsx';
 import YearlyOffer from './components/YearlyOffer.jsx';
-import { getRecipeBox, deleteRecipe, getSession, markEntered } from './utils/api.js';
+import { getRecipeBox, deleteRecipe, getSession, markEntered, saveRecipe } from './utils/api.js';
 import { setSessionId } from './utils/session.js';
 
 /**
@@ -94,13 +94,18 @@ export default function App() {
       saved_at: new Date().toISOString(),
     };
 
-    setSavedRecipes((prev) => {
-      // Avoid duplicate by id or title
-      const exists = prev.some((r) => r.id === recipeId || r.title === normalized.title);
-      if (exists) {
-        return prev;
-      }
-      return [normalized, ...prev];
+    const exists = savedRecipes.some((r) => r.id === recipeId || r.title === normalized.title);
+    if (exists) {
+      return;
+    }
+    setSavedRecipes((prev) => [normalized, ...prev]);
+
+    // Screenshot recipes are already stored by /api/save-from-screenshot.
+    if (recipe.source === 'screenshot') {
+      return;
+    }
+    saveRecipe(normalized, sessionId).catch((err) => {
+      console.warn('Could not save recipe to the server:', err.message);
     });
   };
 
