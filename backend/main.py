@@ -180,6 +180,14 @@ class PaymentClaimRequest(BaseModel):
         populate_by_name = True
 
 
+class RecipeSaveRequest(BaseModel):
+    session_id: Optional[str] = Field(None, alias="sessionId")
+    recipe: Dict[str, Any]
+
+    class Config:
+        populate_by_name = True
+
+
 class AdminLoginRequest(BaseModel):
     password: str
 
@@ -815,6 +823,36 @@ async def get_recipe_box(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch recipe box: {str(exc)}",
+        ) from exc
+
+
+@app.post("/api/recipe-box")
+async def save_recipe_to_box(body: RecipeSaveRequest, request: Request):
+    """Save a suggested recipe into the user's recipe box."""
+    session_id = _resolve_session_id(request, body.session_id)
+    recipe = dict(body.recipe or {})
+    title = str(recipe.get("title") or recipe.get("name") or "").strip()
+    if not title:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A recipe needs a title or name.",
+        )
+
+    recipe.pop("_id", None)
+    recipe.pop("session_id", None)
+    recipe["title"] = title[:200]
+    recipe.setdefault("source", "suggestion")
+    if not recipe.get("ingredients"):
+        recipe["ingredients"] = list(recipe.get("uses") or []) + list(recipe.get("need_to_buy") or [])
+
+    try:
+        saved = await storage.save_recipe(session_id=session_id, recipe_data=recipe)
+        return {"recipe": saved}
+    except Exception as exc:
+        logger.error(f"Error saving recipe for session {session_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save recipe: {str(exc)}",
         ) from exc
 
 
