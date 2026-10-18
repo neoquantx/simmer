@@ -31,11 +31,13 @@ export default function RecipeCards({ recipes = [], onCookRecipe, savedIds = [],
     setExpandedIndex((prev) => (prev === index ? null : index));
   };
 
+  const mealNoun = mealLabel === 'Snacks' ? 'snack' : mealLabel.toLowerCase();
+
   return (
     <div className="w-full space-y-4">
       <div className="flex items-center justify-between px-1">
         <h3 className="text-xl font-black text-charcoal flex items-center gap-2">
-          <span>🍽️</span> 3 {mealLabel.toLowerCase()} ideas
+          <span>🍽️</span> 3 {mealNoun} ideas
         </h3>
         <span className="text-xs font-semibold text-charcoal-muted">
           Tap any card to cook
