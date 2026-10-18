@@ -8,8 +8,6 @@ It runs on **Gemma 3 4B** through [Ollama](https://ollama.com), on your own mach
 
 > **Try 3 meals free. Then ₹99 for the year.**
 
-Built for the [DEV Hacktoberfest Open-Source AI Challenge, Week 2: Side Hustle](https://dev.to/challenges/hacktoberfest-week2-2026-10-12).
-
 | | | | |
 |---|---|---|---|
 | ![Landing page](docs/screenshots/01-landing.png) | ![Kitchen](docs/screenshots/02-kitchen.png) | ![Three recipes](docs/screenshots/04-recipes.png) | ![Shopping list](docs/screenshots/05-shopping-list.png) |
@@ -190,10 +188,6 @@ Interactive docs: http://localhost:8000/docs
 ## Privacy
 
 There are no accounts. Photos go only to the model you run, and Simmer doesn't store them. The database keeps a random session id, your pantry, saved recipes, and suggestion history. If you pay, it also keeps your email and UTR, so the payment can be checked and the receipt sent.
-
-## Challenge timeline
-
-Simmer was started on October 14, 2026, inside the Week 2 window (October 12 to October 18, 2026, 11:59 PM PDT). Any changes made after the deadline will be listed here.
 
 ## License
 
