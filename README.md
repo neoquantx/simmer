@@ -159,7 +159,8 @@ Copy `backend/.env.example` and edit it. This file is ignored by git. Never comm
 | `SIMMER_UPI_NAME` | `Simmer` | Payee name shown in UPI apps |
 | `SIMMER_UPI_NOTE` | `Simmer year` | Payment note in UPI apps |
 | `YEARLY_AMOUNT_INR` | `99` | Yearly price |
-| `ADMIN_PASSWORD` | none | Password for the `/admin` page. Change it before the site is public |
+| `ADMIN_PASSWORD` | none | Password for the `/admin` page. Change it before the site is public. Five wrong tries lock the login for 15 minutes |
+| `FRONTEND_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Web addresses allowed to call the API from a browser |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | none | Mail account that sends PDF receipts |
 | `SUPPORT_EMAIL` | `SMTP_FROM` | Contact address printed on receipts |
 
@@ -332,7 +333,7 @@ Requests are handled one after another by default, so many visitors at the same 
 ## Known limits
 
 - **Photo reading is a guess.** A 4B model can miss an item or name one wrong. Simmer asks you to confirm the ingredients, and it refuses photos that do not look like food. The check is a heuristic, so it is not perfect.
-- **Free meals are a soft limit.** The count is tied to a cookie. Clearing cookies starts a new kitchen, and a direct call to the API can supply its own session.
+- **Free meals are a soft limit.** The count is tied to a cookie. Clearing cookies or opening a private window starts a new kitchen with three free meals. Paid access is not affected: only the admin toggle can grant a year, and a paid kitchen's id cannot be borrowed by another browser.
 - **Payments are confirmed by hand.** You check each UTR in your UPI app. There is no payment gateway, so nothing is confirmed automatically.
 - **Paid access stays on one device.** The year is tied to the kitchen that sent the UTR. Restoring it on a new phone by email is not built yet.
 - **Needs a connection.** Suggestions, photos, saved recipes, and the free-meal count all come from the API. The installed app opens offline, but it cannot cook until it is back online.
