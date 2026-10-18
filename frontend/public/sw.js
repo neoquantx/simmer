@@ -1,5 +1,7 @@
 // Simmer PWA service worker
-const CACHE_NAME = 'simmer-v2';
+const CACHE_NAME = 'simmer-v3';
+// Vite dev-server modules change on every edit and must never be served from cache.
+const DEV_PATHS = ['/src/', '/@vite', '/@react-refresh', '/@id/', '/@fs/', '/node_modules/'];
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -46,6 +48,10 @@ self.addEventListener('fetch', (event) => {
 
   // Ignore non-GET requests (e.g. POST /api/suggest, DELETE, etc.)
   if (request.method !== 'GET') {
+    return;
+  }
+
+  if (url.origin !== self.location.origin || DEV_PATHS.some((path) => url.pathname.startsWith(path))) {
     return;
   }
 
