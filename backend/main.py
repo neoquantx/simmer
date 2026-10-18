@@ -13,6 +13,7 @@ import io
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 import uuid
@@ -133,12 +134,18 @@ app = FastAPI(
 )
 
 # CORS Middleware - Allow all origins for development
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "Accept", "X-Session-ID"],
 )
 
 
@@ -283,25 +290,49 @@ def _resolve_session_id(request: Request, explicit: Optional[str] = None) -> str
     return str(uuid.uuid4())
 
 
+def _cookie_session_id(request: Request) -> str:
+    """Session for free-meal and payment checks.
+
+    Only the HttpOnly cookie counts here. An id sent in the request body could be
+    another visitor's, which would let anyone reuse a paid year.
+    """
+    return request.cookies.get(SESSION_COOKIE) or str(uuid.uuid4())
+
+
+ADMIN_SESSION_SECONDS = 60 * 60 * 12
+ADMIN_MAX_FAILURES = 5
+ADMIN_LOCKOUT_SECONDS = 15 * 60
+_admin_failures: Dict[str, List[float]] = {}
+
+
 def _admin_password() -> str:
     return (os.getenv("ADMIN_PASSWORD") or "").strip()
 
 
-def _admin_token() -> str:
+def _admin_token(expires_at: Optional[int] = None) -> str:
     password = _admin_password()
     if not password:
         return ""
-    return hmac.new(password.encode("utf-8"), b"simmer-admin", hashlib.sha256).hexdigest()
+    expires_at = expires_at or int(time.time()) + ADMIN_SESSION_SECONDS
+    signature = hmac.new(
+        password.encode("utf-8"), f"simmer-admin:{expires_at}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{expires_at}.{signature}"
 
 
 def _require_admin(request: Request) -> None:
-    expected = _admin_token()
-    if not expected:
+    if not _admin_password():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Set ADMIN_PASSWORD in backend/.env before using the admin page.",
         )
-    if not hmac.compare_digest(request.cookies.get(ADMIN_COOKIE) or "", expected):
+    token = request.cookies.get(ADMIN_COOKIE) or ""
+    expires_raw, _, _ = token.partition(".")
+    try:
+        expires_at = int(expires_raw)
+    except ValueError:
+        expires_at = 0
+    if expires_at <= time.time() or not hmac.compare_digest(token, _admin_token(expires_at)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Admin login required.",
@@ -478,7 +509,7 @@ async def payment_info():
 @app.post("/api/payment/claim")
 async def payment_claim(body: PaymentClaimRequest, request: Request):
     """Visitor submits UTR + email after paying the UPI QR. Admin must toggle paid."""
-    session_id = _resolve_session_id(request, body.session_id)
+    session_id = _cookie_session_id(request)
     await storage.get_or_create_session(session_id)
 
     email = (body.email or "").strip().lower()
@@ -491,6 +522,21 @@ async def payment_claim(body: PaymentClaimRequest, request: Request):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Enter the UPI reference / UTR from your payment app (8–22 letters or digits).",
+        )
+
+    recent_claims = await storage.list_payment_claims(limit=500)
+    if any(c.get("utr") == utr and c.get("status") == "paid" for c in recent_claims):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This UTR has already been used for a paid year.",
+        )
+    pending_here = [
+        c for c in recent_claims if c.get("session_id") == session_id and c.get("status") == "pending"
+    ]
+    if len(pending_here) >= 3:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Your payment is already waiting to be checked. It will unlock soon.",
         )
 
     claim = await storage.create_payment_claim(
@@ -506,23 +552,35 @@ async def payment_claim(body: PaymentClaimRequest, request: Request):
 
 
 @app.post("/api/admin/login")
-async def admin_login(body: AdminLoginRequest):
+async def admin_login(body: AdminLoginRequest, request: Request):
     password = _admin_password()
     if not password:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Set ADMIN_PASSWORD in backend/.env first.",
         )
+
+    client = request.client.host if request.client else "unknown"
+    now = time.time()
+    recent = [t for t in _admin_failures.get(client, []) if now - t < ADMIN_LOCKOUT_SECONDS]
+    if len(recent) >= ADMIN_MAX_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many wrong passwords. Try again in 15 minutes.",
+        )
     if not hmac.compare_digest(body.password.strip(), password):
+        recent.append(now)
+        _admin_failures[client] = recent
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong password.")
+    _admin_failures.pop(client, None)
 
     response = JSONResponse({"ok": True})
     response.set_cookie(
         key=ADMIN_COOKIE,
         value=_admin_token(),
         httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 12,
+        samesite="strict",
+        max_age=ADMIN_SESSION_SECONDS,
         path="/",
     )
     return response
@@ -587,7 +645,7 @@ async def admin_toggle_claim(claim_id: str, body: AdminToggleRequest, request: R
 @app.post("/api/suggest")
 async def suggest_recipes(body: SuggestRequest, request: Request):
     """Generate recipe suggestions matching available ingredients and preferences."""
-    session_id = _resolve_session_id(request, body.session_id)
+    session_id = _cookie_session_id(request)
     record = await storage.get_or_create_session(session_id)
     paid = _is_paid(record)
     if not paid and int(record.get("free_uses") or 0) >= FREE_SUGGESTIONS:
